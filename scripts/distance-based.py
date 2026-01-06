@@ -1,6 +1,8 @@
 import numpy as np
 import subprocess
 from msrc_simulator import *
+import networkx as nx
+
 
 def rearrangement_distance_matrix(matrix):
     """
@@ -45,6 +47,29 @@ def infer_species_tree_fastme(matrix, taxa, prefix="msrc"):
     run_fastme(dist_file, tree_file)
 
     return tree_file
+
+def dcj_distance_matrix(genomes_by_locus, taxa):
+    """
+    genomes_by_locus: list of dicts
+        genomes_by_locus[locus][taxon] = adjacency set
+    """
+
+    n = len(taxa)
+    L = len(genomes_by_locus)
+    D = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = 0.0
+            for locus in genomes_by_locus:
+                dist += dcj_distance(
+                    locus[taxa[i]],
+                    locus[taxa[j]]
+                )
+            D[i, j] = D[j, i] = dist / L
+
+    return D
+
 
 if __name__ == "__main__":
     # MSRC-augmented data

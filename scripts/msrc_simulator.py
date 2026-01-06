@@ -2,8 +2,9 @@ from ete3 import Tree
 import numpy as np
 import random
 import dendropy
-import re
 import argparse
+from utils import *
+from rearrangements import *
 
 class RearrangementStateSpace:
     def __init__(self, k):
@@ -38,13 +39,6 @@ class RearrangementCTMC:
     def _jump(self, current):
         choices = [s for s in self.state_space.states if s != current]
         return random.choice(choices)
-
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text
-            for text in re.split(r'(\d+)', s)]
-
-def sort_taxa_naturally(taxa):
-    return sorted(taxa, key=natural_sort_key)
 
 def simulate_rearrangements_on_gene_tree(
     gene_tree_newick,
@@ -83,31 +77,6 @@ def simulate_rearrangements_on_gene_tree(
     }
 
     return tip_states
-
-def read_taxa_from_gene_trees(gene_tree_file):
-    """
-    Reads all taxa appearing in a SimPhy-style gene tree file
-    (one Newick tree per line).
-    Returns a sorted list of taxon labels.
-    """
-    taxa = set()
-
-    with open(gene_tree_file) as f:
-        for line in f:
-            newick = line.strip()
-            if not newick:
-                continue
-
-            tree = dendropy.Tree.get(
-                data=newick,
-                schema="newick",
-                preserve_underscores=True
-            )
-
-            for leaf in tree.leaf_node_iter():
-                taxa.add(leaf.taxon.label)
-
-    return sort_taxa_naturally(taxa)
 
 
 def augment_simphy_dataset(
@@ -155,17 +124,88 @@ def augment_simphy_dataset(
 
     return np.array(dataset), taxa
 
+def evolve_fixation(adjacencies, branch_length, rate):
+    """
+    Poisson number of DCJ events along a branch.
+    """
+    t = 0.0
+    genome = set(adjacencies)
 
-def create_matrix(matrix, taxa, out_file):
-    header = "\t".join(taxa)
-    np.savetxt(
-        out_file,
-        matrix,
-        fmt="%d",
-        delimiter="\t",
-        header=header,
-        comments=""
-    )
+    while True:
+        t += random.expovariate(rate)
+        if t > branch_length:
+            break
+        genome = dcj_operation(genome)
+
+    return genome
+
+def evolve_polymorphism(adjacencies, branch_length, rearr_rate, resample_rate=1.0):
+    """
+    MSRC polymorphism model for a single lineage.
+    """
+    t = 0.0
+    genome = set(adjacencies)
+    population = set(adjacencies)
+
+    while t < branch_length:
+        next_rearr = random.expovariate(rearr_rate)
+        next_resample = random.expovariate(resample_rate)
+
+        if next_rearr < next_resample:
+            t += next_rearr
+            if t > branch_length:
+                break
+            population = dcj_operation(population)
+        else:
+            t += next_resample
+            if t > branch_length:
+                break
+            genome = set(population)
+
+    return genome
+
+def augment_simphy_with_adjacencies(
+    gene_tree_file,
+    k_genes=20,
+    rearr_rate=1.0,
+    model="polymorphism"
+):
+    loci = []
+
+    with open(gene_tree_file) as f:
+        for line in f:
+            if not line.strip():
+                continue
+
+            tree = dendropy.Tree.get(
+                data=line.strip(),
+                schema="newick",
+                preserve_underscores=True
+            )
+
+            root_adj = identity_adjacencies(k_genes)
+            locus = {}
+
+            for node in tree.preorder_node_iter():
+                if node.parent_node is None:
+                    node.adj = root_adj
+                else:
+                    bl = node.edge_length or 0.0
+                    if model == "fixation":
+                        node.adj = evolve_fixation(
+                            node.parent_node.adj, bl, rearr_rate
+                        )
+                    else:
+                        node.adj = evolve_polymorphism(
+                            node.parent_node.adj, bl, rearr_rate
+                        )
+
+                if node.is_leaf():
+                    locus[node.taxon.label] = node.adj
+
+            loci.append(locus)
+
+    return loci
 
 
 if __name__ == "__main__":
@@ -180,11 +220,27 @@ if __name__ == "__main__":
                         help="Rearrangement rate")
     args = parser.parse_args()
 
-    matrix, taxa = augment_simphy_dataset(
+    # matrix, taxa = augment_simphy_dataset(
+    #     gene_tree_file=args.genetrees,
+    #     k_states=args.kstates,
+    #     rearrangement_rate=args.rate
+    # )
+    #
+    # create_matrix(matrix, taxa, args.output)
+    # forward_map, reverse_map = make_tnt_taxon_map(taxa)
+    # write_tnt_matrix_with_map(matrix, taxa, "concat.phy", forward_map)
+
+    genomes_by_locus = augment_simphy_with_adjacencies(
         gene_tree_file=args.genetrees,
-        k_states=args.kstates,
-        rearrangement_rate=args.rate
+        k_genes=args.kstates,
+        rearr_rate=args.rate,
+        model="polymorphism"
     )
 
-    create_matrix(matrix, taxa, args.output)
+    taxa = read_taxa_from_gene_trees(args.genetrees)
+    matrix = adjacency_matrix_to_binary_concat(genomes_by_locus, taxa)
+    forward_map, reverse_map = make_tnt_taxon_map(taxa)
+    write_tnt_matrix_with_map(matrix, taxa, "concat.phy", forward_map)
+
+    
 
